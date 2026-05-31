@@ -5,40 +5,43 @@ import time
 import uuid
 import re
 import os
+import logging
 from config import BOT_TOKEN, FIREBASE_URL
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Fix 1: Threading ko False kiya taaki Render Gunicorn ke saath bot hang na ho
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+telebot.logger.setLevel(logging.INFO)
+
 app = Flask(__name__)
 
-# Firebase Helper Functions
+# Fix 2: Firebase me timeout lagaya taaki network slow hone par bot na ruke
 def fb_get(path):
     try:
-        r = requests.get(f"{FIREBASE_URL}{path}.json")
+        r = requests.get(f"{FIREBASE_URL}{path}.json", timeout=5)
         return r.json() if r.status_code == 200 else None
     except:
         return None
 
 def fb_put(path, data):
     try:
-        r = requests.put(f"{FIREBASE_URL}{path}.json", json=data)
+        r = requests.put(f"{FIREBASE_URL}{path}.json", json=data, timeout=5)
         return r.json() if r.status_code == 200 else None
     except:
         return None
 
 def fb_patch(path, data):
     try:
-        r = requests.patch(f"{FIREBASE_URL}{path}.json", json=data)
+        r = requests.patch(f"{FIREBASE_URL}{path}.json", json=data, timeout=5)
         return r.json() if r.status_code == 200 else None
     except:
         return None
 
 def fb_delete(path):
     try:
-        requests.delete(f"{FIREBASE_URL}{path}.json")
+        requests.delete(f"{FIREBASE_URL}{path}.json", timeout=5)
     except:
         pass
 
-# Auto SIM Detect Logic
 def detect_sim(number):
     if re.match(r'^(6|7|8|9)', number):
         if re.match(r'^(70|79|88|99|62|63|89|91)', number): return "JIO"
@@ -49,143 +52,148 @@ def detect_sim(number):
 # --- TELEGRAM BOT LOGIC ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    chat_id = str(message.chat.id)
-    first_name = message.from_user.first_name
-    
-    fb_patch(f"/users/{chat_id}", {"name": first_name})
-    fb_patch(f"/states/{chat_id}", {"step": "start"})
-    
-    markup = telebot.types.InlineKeyboardMarkup()
-    markup.add(
-        telebot.types.InlineKeyboardButton("🎁 FREE DATA", callback_data="free_data"),
-        telebot.types.InlineKeyboardButton("💳 PAID BY DATA", callback_data="paid_data")
-    )
-    bot.send_message(chat_id, "<b>🎉 Welcome to Data Pack Giveaway Bot!</b>\n\nPlease select an option below:", reply_markup=markup, parse_mode="HTML")
+    try:
+        chat_id = str(message.chat.id)
+        first_name = message.from_user.first_name or "User"
+        
+        fb_patch(f"/users/{chat_id}", {"name": first_name})
+        fb_patch(f"/states/{chat_id}", {"step": "start"})
+        
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.add(
+            telebot.types.InlineKeyboardButton("🎁 FREE DATA", callback_data="free_data"),
+            telebot.types.InlineKeyboardButton("💳 PAID BY DATA", callback_data="paid_data")
+        )
+        bot.send_message(chat_id, "<b>🎉 Welcome to Data Pack Giveaway Bot!</b>\n\nPlease select an option below:", reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        print(f"Error in start: {e}")
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
-    chat_id = str(message.chat.id)
-    text = message.text.strip()
-    
-    state = fb_get(f"/states/{chat_id}")
-    if not state:
-        state = {"step": "start"}
-    
-    step = state.get("step", "start")
-
-    if step == 'awaiting_key':
-        pack_id = state.get('pack_id')
-        user_key = text
+    try:
+        chat_id = str(message.chat.id)
+        text = message.text.strip()
         
-        key_data = fb_get(f"/keys/{user_key}")
+        state = fb_get(f"/states/{chat_id}")
+        if not state:
+            state = {"step": "start"}
         
-        if key_data and key_data.get('pack_id') == pack_id:
-            current_time = int(time.time())
-            if current_time <= key_data.get('expiry_time', 0) and int(key_data.get('uses', 0)) > 0:
-                fb_patch(f"/states/{chat_id}", {"step": "awaiting_number", "key_used": user_key})
-                bot.send_message(chat_id, "✅ <b>Key Verified!</b>\n\nPlease enter your Mobile Number (10 digits):", parse_mode="HTML")
-            else:
-                bot.send_message(chat_id, "❌ <b>Invalid or Expired Key!</b>\nTime limit crossed or key already used.", parse_mode="HTML")
-                fb_patch(f"/states/{chat_id}", {"step": "start"})
-        else:
-            bot.send_message(chat_id, "❌ <b>Wrong Key!</b> Please enter correct key for this pack.", parse_mode="HTML")
-        return
+        step = state.get("step", "start")
 
-    if step == 'awaiting_number':
-        number = text
-        if len(number) >= 10:
-            sim_name = detect_sim(number)
+        if step == 'awaiting_key':
+            pack_id = state.get('pack_id')
+            user_key = text
             
-            fb_patch(f"/states/{chat_id}", {
-                "step": "ready_submit",
-                "number": number,
-                "sim": sim_name
-            })
+            key_data = fb_get(f"/keys/{user_key}")
+            
+            if key_data and key_data.get('pack_id') == pack_id:
+                current_time = int(time.time())
+                if current_time <= key_data.get('expiry_time', 0) and int(key_data.get('uses', 0)) > 0:
+                    fb_patch(f"/states/{chat_id}", {"step": "awaiting_number", "key_used": user_key})
+                    bot.send_message(chat_id, "✅ <b>Key Verified!</b>\n\nPlease enter your Mobile Number (10 digits):", parse_mode="HTML")
+                else:
+                    bot.send_message(chat_id, "❌ <b>Invalid or Expired Key!</b>\nTime limit crossed or key already used.", parse_mode="HTML")
+                    fb_patch(f"/states/{chat_id}", {"step": "start"})
+            else:
+                bot.send_message(chat_id, "❌ <b>Wrong Key!</b> Please enter correct key for this pack.", parse_mode="HTML")
+            return
 
-            msg_text = (
-                "📱 <b>Number Auto-Detected!</b>\n\n"
-                f"📞 <b>Number:</b> {number}\n"
-                f"📡 <b>SIM Card:</b> {sim_name}\n\n"
-                "Click <b>Submit</b> to send request to Admin."
-            )
+        if step == 'awaiting_number':
+            number = text
+            if len(number) >= 10:
+                sim_name = detect_sim(number)
+                
+                fb_patch(f"/states/{chat_id}", {
+                    "step": "ready_submit",
+                    "number": number,
+                    "sim": sim_name
+                })
 
-            markup = telebot.types.InlineKeyboardMarkup()
-            markup.add(telebot.types.InlineKeyboardButton("✅ SUBMIT REQUEST", callback_data="submit_request"))
-            bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            bot.send_message(chat_id, "❌ Please enter a valid 10-digit number.")
-        return
+                msg_text = (
+                    "📱 <b>Number Auto-Detected!</b>\n\n"
+                    f"📞 <b>Number:</b> {number}\n"
+                    f"📡 <b>SIM Card:</b> {sim_name}\n\n"
+                    "Click <b>Submit</b> to send request to Admin."
+                )
+
+                markup = telebot.types.InlineKeyboardMarkup()
+                markup.add(telebot.types.InlineKeyboardButton("✅ SUBMIT REQUEST", callback_data="submit_request"))
+                bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
+            else:
+                bot.send_message(chat_id, "❌ Please enter a valid 10-digit number.")
+            return
+    except Exception as e:
+        print(f"Error in text handle: {e}")
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
-    chat_id = str(call.message.chat.id)
-    callback_data = call.data
-    first_name = call.from_user.first_name
+    try:
+        chat_id = str(call.message.chat.id)
+        callback_data = call.data
+        first_name = call.from_user.first_name or "User"
 
-    if callback_data == 'free_data':
-        packs = fb_get("/packs")
-        if not packs:
-            bot.send_message(chat_id, "No free packs available right now.")
+        if callback_data == 'free_data':
+            packs = fb_get("/packs")
+            if not packs:
+                bot.send_message(chat_id, "No free packs available right now.")
+                return
+
+            for pack_id, pack in packs.items():
+                price = str(pack.get('price'))
+                price_text = "00PACK" if price in ['0', '00'] else f"{price} RS"
+                
+                msg_text = (
+                    "╔═════════════════════════╗\n"
+                    "╠ 🎁 <b>FREE DATA GIVEAWAY</b>\n"
+                    "╠═════════════════════════╣\n"
+                    f"╠ 📦 <b>Data:</b> {pack.get('data_amount')}\n"
+                    f"╠ 💰 <b>Price:</b> {price_text}\n"
+                    f"╠ 📜 <b>Condition:</b> {pack.get('conditions')}\n"
+                    "╚═════════════════════════╝\n\n"
+                    "<i>To claim this pack, click below!</i>"
+                )
+
+                markup = telebot.types.InlineKeyboardMarkup()
+                markup.add(telebot.types.InlineKeyboardButton(f"🚀 CLAIM {price_text}", callback_data=f"claim_{pack_id}"))
+                bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
             return
 
-        for pack_id, pack in packs.items():
-            price = str(pack.get('price'))
-            price_text = "00PACK" if price in ['0', '00'] else f"{price} RS"
-            
-            msg_text = (
-                "╔═════════════════════════╗\n"
-                "╠ 🎁 <b>FREE DATA GIVEAWAY</b>\n"
-                "╠═════════════════════════╣\n"
-                f"╠ 📦 <b>Data:</b> {pack.get('data_amount')}\n"
-                f"╠ 💰 <b>Price:</b> {price_text}\n"
-                f"╠ 📜 <b>Condition:</b> {pack.get('conditions')}\n"
-                "╚═════════════════════════╝\n\n"
-                "<i>To claim this pack, click below!</i>"
-            )
+        if callback_data == 'paid_data':
+            bot.send_message(chat_id, "Paid data option coming soon. Only free is active right now.")
+            return
 
-            markup = telebot.types.InlineKeyboardMarkup()
-            markup.add(telebot.types.InlineKeyboardButton(f"🚀 CLAIM {price_text}", callback_data=f"claim_{pack_id}"))
-            bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
-        return
+        if callback_data.startswith('claim_'):
+            pack_id = callback_data.replace('claim_', '')
+            fb_patch(f"/states/{chat_id}", {"step": "awaiting_key", "pack_id": pack_id})
+            bot.send_message(chat_id, "🔑 <b>Enter Access Key!</b>\n\nPlease send the admin-provided key for this pack. (Key has time and user limits)", parse_mode="HTML")
+            return
 
-    if callback_data == 'paid_data':
-        bot.send_message(chat_id, "Paid data option coming soon. Only free is active right now.")
-        return
+        if callback_data == 'submit_request':
+            state = fb_get(f"/states/{chat_id}")
+            if state and state.get('step') == 'ready_submit':
+                req_id = "req_" + str(uuid.uuid4().hex)[:8]
+                
+                key_id = state.get('key_used')
+                key_data = fb_get(f"/keys/{key_id}")
+                if key_data:
+                    new_uses = int(key_data.get('uses', 1)) - 1
+                    fb_patch(f"/keys/{key_id}", {"uses": new_uses})
 
-    if callback_data.startswith('claim_'):
-        pack_id = callback_data.replace('claim_', '')
-        fb_patch(f"/states/{chat_id}", {"step": "awaiting_key", "pack_id": pack_id})
-        bot.send_message(chat_id, "🔑 <b>Enter Access Key!</b>\n\nPlease send the admin-provided key for this pack. (Key has time and user limits)", parse_mode="HTML")
-        return
+                request_data = {
+                    "chat_id": chat_id,
+                    "name": first_name,
+                    "pack_id": state.get('pack_id'),
+                    "number": state.get('number'),
+                    "sim": state.get('sim'),
+                    "status": "pending"
+                }
+                fb_put(f"/requests/{req_id}", request_data)
+                fb_patch(f"/states/{chat_id}", {"step": "start"})
 
-    if callback_data == 'submit_request':
-        state = fb_get(f"/states/{chat_id}")
-        if state and state.get('step') == 'ready_submit':
-            req_id = "req_" + str(uuid.uuid4().hex)[:8]
-            
-            # Decrease key usage
-            key_id = state.get('key_used')
-            key_data = fb_get(f"/keys/{key_id}")
-            if key_data:
-                new_uses = int(key_data.get('uses', 1)) - 1
-                fb_patch(f"/keys/{key_id}", {"uses": new_uses})
-
-            # Save Request
-            request_data = {
-                "chat_id": chat_id,
-                "name": first_name,
-                "pack_id": state.get('pack_id'),
-                "number": state.get('number'),
-                "sim": state.get('sim'),
-                "status": "pending"
-            }
-            fb_put(f"/requests/{req_id}", request_data)
-
-            # Clear state
-            fb_patch(f"/states/{chat_id}", {"step": "start"})
-
-            bot.send_message(chat_id, "✅ <b>Success!</b>\nYour request has been sent to the Admin. Please wait for verification.", parse_mode="HTML")
-        return
+                bot.send_message(chat_id, "✅ <b>Success!</b>\nYour request has been sent to the Admin. Please wait for verification.", parse_mode="HTML")
+            return
+    except Exception as e:
+        print(f"Error in callback: {e}")
 
 # --- FLASK ADMIN PANEL & ROUTES ---
 ADMIN_HTML = """
@@ -333,14 +341,19 @@ def admin_panel():
 
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return "!", 200
+    try:
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "!", 200
+    except Exception as e:
+        print(f"Webhook Error: {e}")
+        return "!", 500
 
 @app.route("/setwebhook")
 def webhook():
     bot.remove_webhook()
+    time.sleep(1) # Fix 3: Thoda delay taaki Telegram purana webhook clean kar de
     url = request.host_url + BOT_TOKEN
     bot.set_webhook(url=url)
     return f"✅ Webhook successfully set to: {url}", 200
